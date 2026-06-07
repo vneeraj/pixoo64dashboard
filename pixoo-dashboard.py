@@ -91,6 +91,7 @@ def get_weather():
         if wmo_code in [0]: cond = "clear"
         elif wmo_code in [1, 2]: cond = "partly cloudy"
         elif wmo_code in [3, 45, 48]: cond = "cloudy"
+        elif wmo_code in [71, 73, 75, 77, 85, 86]: cond = "snow"
         else: cond = "rain"
             
         return {"curr": curr, "high": high, "low": low, "rain": rain, "cond": cond}
@@ -155,6 +156,17 @@ def draw_large_weather_icon(pixoo, condition, x_min=0, x_max=28, y_min=8, y_max=
             (8, 11, BLUE), (8, 13, BLUE),
             (12, 11, BLUE), (12, 13, BLUE)
         ])
+    elif condition == "snow":
+        for dx in range(2, 16):
+            for dy in range(3, 9): pixels.append((dx, dy, WHITE))
+        for dx in range(5, 13):
+            for dy in range(1, 3): pixels.append((dx, dy, WHITE))
+        # Updated: Snowflake elements modified from CYAN to WHITE
+        pixels.extend([
+            (3, 11, WHITE), (5, 13, WHITE),
+            (8, 12, WHITE), (10, 14, WHITE),
+            (13, 11, WHITE), (15, 13, WHITE)
+        ])
     elif condition == "cloudy":
         for dx in range(1, 16):
             for dy in range(4, 11): pixels.append((dx, dy, WHITE))
@@ -203,7 +215,6 @@ def draw_mta_bullet(pixoo, letter, start_x, start_y, color):
 
 def draw_stationary_train_times(pixoo, times_list, y, color):
     """Draws transit digits centered inside tracking cells right-aligned to column 61."""
-    # Shifted left 1 additional pixel so column 3 structurally matches the % sign alignment axis
     slots = [
         {"min_x": 29, "max_x": 37},
         {"min_x": 41, "max_x": 49},
@@ -211,7 +222,6 @@ def draw_stationary_train_times(pixoo, times_list, y, color):
     ]
     slot_width = 9
     
-    # Isolation dots re-centered at columns 39 and 51
     pixoo.draw_pixel((39, y + 4), color)
     pixoo.draw_pixel((51, y + 4), color)
     
@@ -246,29 +256,31 @@ def main():
         date_str = f"{days_map[now_local.weekday()]} {now_local.month}/{now_local.day}"
         draw_text_custom(pixoo, date_str, 2, 2, WHITE)
         
-        # Labels right-aligned to column 42 to ensure perfectly aligned text stacking
         draw_text_custom(pixoo, "HI", 42 - get_text_width("HI"), 8, ORANGE)
         draw_text_custom(pixoo, "LO", 42 - get_text_width("LO"), 14, VIVID_BLUE)
         
-        # Small raindrop icon mini-graphic replacing "RN" label text
-        raindrop = [(1,0), (1,1), (2,1), (0,2), (1,2), (2,2), (3,2), (0,3), (1,3), (2,3), (3,3), (1,4), (2,4)]
-        for dx, dy in raindrop:
-            pixoo.draw_pixel((38 + dx, 20 + dy), CYAN)
+        # Dynamic context-aware precipitation mini-graphic swap
+        if weather['cond'] == "snow":
+            # Updated: Micro snowflake graphic points modified from CYAN to WHITE
+            snowflake = [(0,0), (3,0), (1,1), (2,1), (0,2), (1,2), (2,2), (3,2), (1,3), (2,3), (0,4), (3,4)]
+            for dx, dy in snowflake:
+                pixoo.draw_pixel((38 + dx, 20 + dy), WHITE)
+        else:
+            raindrop = [(1,0), (1,1), (2,1), (0,2), (1,2), (2,2), (3,2), (0,3), (1,3), (2,3), (3,3), (1,4), (2,4)]
+            for dx, dy in raindrop:
+                pixoo.draw_pixel((38 + dx, 20 + dy), CYAN)
         
-        # Values right-aligned to column 62 to preserve a clean 1-pixel right margin
         draw_text_custom(pixoo, f"{weather['curr']}F", 62 - get_text_width(f"{weather['curr']}F"), 2, WHITE)
         draw_text_custom(pixoo, f"{weather['high']}F", 62 - get_text_width(f"{weather['high']}F"), 8, ORANGE)
         draw_text_custom(pixoo, f"{weather['low']}F", 62 - get_text_width(f"{weather['low']}F"), 14, VIVID_BLUE)
         draw_text_custom(pixoo, f"{weather['rain']}%", 61 - get_text_width(f"{weather['rain']}%"), 20, CYAN)
         
-        # Draw weather icon bounded within column limits
         draw_large_weather_icon(pixoo, weather['cond'], x_min=0, x_max=28, y_min=8, y_max=25)
         draw_dotted_line(pixoo, 26, GRAY)
         
         # --- STOCKS CARD ---
         draw_text_custom(pixoo, "SP500", 2, 29, stock_color)
         
-        # Performance value pinned right, with trend arrow offset 6 pixels to the left
         val_x = 61 - get_text_width(stocks['perf'])
         draw_text_custom(pixoo, stocks['perf'], val_x, 29, stock_color)
         draw_text_custom(pixoo, stocks['arrow'], val_x - 6, 29, stock_color)
