@@ -1,4 +1,5 @@
 import time
+import math
 import requests
 import yfinance as yf
 from datetime import datetime
@@ -7,7 +8,11 @@ from pixoo import Pixoo
 # ==================== CONFIGURATION ====================
 PIXOO_IP = "192.168.1.153"  # Replace with your Pixoo 64's local IP address
 STATION_ID = "A28"          # "A28" is 34 St-Penn Station (A/C/E). Change to your target station ID.
-REFRESH_INTERVAL = 30       # Time in seconds between screen refreshes
+REFRESH_INTERVAL = 30       # Time in seconds between background data refreshes
+
+# --- TICKER SPEED CONTROLS (BLOOMBERG-STYLE) ---
+TICKER_SPEED = 0.02         # Lower value = faster refresh rate (seconds per frame shift)
+TICKER_STEP = 1             # Pixels shifted per frame. Keep at 1 for max smoothness.
 # =======================================================
 
 # --- AUTOMATED PREMIUM UNIFIED PIXEL FONT ---
@@ -57,25 +62,25 @@ CUSTOM_FONT = {
 }
 
 def get_text_width(text):
-    """Calculates custom text string width dynamically to guarantee pixel alignments."""
     w_map = {'M':5, 'N':5, 'W':5, 'Q':5, 'I':3, 'T':3, 'Y':3, '1':3, '.':1, ' ':2, '%':3, '/':3, '▲':3, '▼':3}
     return sum(w_map.get(c, 4) + 1 for c in text) - 1
 
 def draw_text_custom(pixoo, text, start_x, start_y, color):
-    """Draws custom text pixel arrays safely without padding shifts."""
     w_map = {'M':5, 'N':5, 'W':5, 'Q':5, 'I':3, 'T':3, 'Y':3, '1':3, '.':1, ' ':2, '%':3, '/':3, '▲':3, '▼':3}
     current_x = start_x
     for char in text:
         if char in CUSTOM_FONT:
             for dx, dy in CUSTOM_FONT[char]:
-                pixoo.draw_pixel((current_x + dx, start_y + dy), color)
+                px = current_x + dx
+                py = start_y + dy
+                if 0 <= px < 64 and 0 <= py < 64:
+                    pixoo.draw_pixel((px, py), color)
             current_x += w_map.get(char, 4) + 1
 
-# --- HYPER-LOCAL HUDSON YARDS DATA MODULES ---
+# --- DATA ACQUISITION MODULES ---
 def get_weather():
-    """Queries Open-Meteo API using exact coordinates for Hudson Yards neighborhood forecasting."""
     try:
-        url = "https://api.open-meteo.com/v1/forecast?latitude=40.7539&longitude=-74.0010&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&hourly=precipitation_probability&temperature_unit=fahrenheit&timezone=America%2FNew_York&forecast_days=1"
+        url = "https://api.open-meteo.com/v1/forecast?latitude=40.7539&longitude=-74.0010&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min,sunset&hourly=precipitation_probability&temperature_unit=fahrenheit&timezone=America%2FNew_York&forecast_days=1"
         r = requests.get(url, timeout=5)
         r.raise_for_status()
         data = r.json()
@@ -94,26 +99,51 @@ def get_weather():
         elif wmo_code in [71, 73, 75, 77, 85, 86]: cond = "snow"
         else: cond = "rain"
             
-        return {"curr": curr, "high": high, "low": low, "rain": rain, "cond": cond}
+        sunset_raw = data['daily']['sunset'][0]
+        sunset_dt = datetime.strptime(sunset_raw, "%Y-%m-%dT%H:%M")
+        is_night = datetime.now() >= sunset_dt
+        
+        hour_12 = sunset_dt.hour % 12
+        if hour_12 == 0: hour_12 = 12
+        sunset_str = f"{hour_12}:{sunset_dt.minute:02d}P"
+            
+        return {"curr": curr, "high": high, "low": low, "rain": rain, "cond": cond, "sunset": sunset_str, "is_night": is_night}
     except Exception as e:
         print(f"Hudson Yards Weather Fetch Error: {e}")
-        return {"curr": "--", "high": "--", "low": "--", "rain": "--", "cond": "unknown"}
+        return {"curr": "--", "high": "--", "low": "--", "rain": "--", "cond": "unknown", "sunset": "--:--P", "is_night": False}
 
-def get_stocks():
-    """Fetches stock trends separating directions into numeric tracking properties."""
+def get_financials():
+    GREEN, RED, WHITE = (0, 255, 0), (255, 0, 0), (255, 255, 255)
+    res = {
+        "spx": {"perf": "--%", "arrow": "▲", "color": GREEN},
+        "rut": {"perf": "--%", "arrow": "▲", "color": GREEN},
+        "tnx": {"perf": "--%", "color": WHITE}
+    }
     try:
-        ticker = yf.Ticker("^GSPC")
-        hist = ticker.history(period="2d")
-        if len(hist) >= 2:
-            prev_close = hist['Close'].iloc[-2]
-            curr_price = hist['Close'].iloc[-1]
-            pct_change = ((curr_price - prev_close) / prev_close) * 100
+        tickers = yf.Tickers("^GSPC ^RUT ^TNX")
+        
+        h_spx = tickers.tickers["^GSPC"].history(period="2d")
+        if len(h_spx) >= 2:
+            pct = ((h_spx['Close'].iloc[-1] - h_spx['Close'].iloc[-2]) / h_spx['Close'].iloc[-2]) * 100
+            res["spx"] = {"perf": f"{abs(pct):.2f}%", "arrow": "▲" if pct >= 0 else "▼", "color": GREEN if pct >= 0 else RED}
             
-            arrow = "▲" if pct_change >= 0 else "▼"
-            return {"perf": f"{abs(pct_change):.2f}%", "arrow": arrow, "up": pct_change >= 0}
+        h_rut = tickers.tickers["^RUT"].history(period="2d")
+        if len(h_rut) >= 2:
+            pct = ((h_rut['Close'].iloc[-1] - h_rut['Close'].iloc[-2]) / h_rut['Close'].iloc[-2]) * 100
+            res["rut"] = {"perf": f"{abs(pct):.2f}%", "arrow": "▲" if pct >= 0 else "▼", "color": GREEN if pct >= 0 else RED}
+            
+        h_tnx = tickers.tickers["^TNX"].history(period="1d")
+        if len(h_tnx) >= 1:
+            val = h_tnx['Close'].iloc[-1]
+            res["tnx"] = {"perf": f"{val:.2f}%", "color": WHITE}
     except Exception as e:
-        print(f"Stock Fetch Error: {e}")
-    return {"perf": "--%", "arrow": "▲", "up": True}
+        print(f"Financial Market Fetch Error: {e}")
+    return res
+
+def get_moon_phase_value():
+    now = datetime.now()
+    diff = now - datetime(2000, 1, 6, 18, 14)
+    return (diff.total_seconds() / 86400.0 % 29.530588853) / 29.530588853
 
 def get_subway_times(stop_id_prefix):
     uptown_times, downtown_times = [], []
@@ -137,39 +167,62 @@ def get_subway_times(stop_id_prefix):
         print(f"MTA Subway Fetch Error: {e}")
     return {"uptown": uptown_times, "downtown": downtown_times}
 
+# --- GRAPHICS ENGINE MODULES ---
 def draw_dotted_line(pixoo, y, color):
     for x in range(0, 64, 2):
         pixoo.draw_pixel((x, y), color)
 
-def draw_large_weather_icon(pixoo, condition, x_min=0, x_max=28, y_min=8, y_max=25):
-    """Generates complex retro shaded weather icons centered inside canvas constraints."""
-    # Palette definition mapping
-    SUN_WHITE  = (255, 255, 230)
-    SUN_CORE   = (255, 230, 0)
-    SUN_GLOW   = (255, 120, 0)
-    SUN_RAY    = (230, 60, 0)
+def draw_large_moon_phase(pixoo, phase_val, x_min=0, x_max=28, y_min=9, y_max=26):
+    cx = x_min + (x_max - x_min + 1) // 2
+    cy = y_min + (y_max - y_min + 1) // 2
+    R = 7.2
+    phi = math.pi - (2.0 * math.pi * phase_val)
     
-    CLOUD_WHITE= (255, 255, 255)
-    CLOUD_BODY = (185, 195, 205)
-    CLOUD_SHADE= (105, 115, 125)
-    
-    STORM_BODY = (110, 115, 125)
-    STORM_SHADE= (65, 70, 80)
-    
-    RAIN_DEEP  = (0, 95, 230)
-    RAIN_LITE  = (75, 175, 255)
-    SNOW_CRYST = (215, 240, 255)
+    for y in range(y_min, y_max + 1):
+        for x in range(x_min, x_max + 1):
+            dx, dy = x - cx, y - cy
+            dist_sq = dx * dx + dy * dy
+            
+            if dist_sq <= R * R:
+                nx = max(-1.0, min(1.0, dx / R))
+                ny = max(-1.0, min(1.0, dy / R))
+                alpha = math.asin(nx)
+                
+                lighting = math.cos(alpha - phi)
+                z = math.sqrt(max(0.0, 1.0 - nx * nx - ny * ny))
+                
+                if lighting > 0:
+                    if lighting > 0.6 and z > 0.4: col = (255, 255, 255)
+                    elif lighting > 0.2: col = (240, 240, 225)
+                    else: col = (180, 185, 195)
+                    
+                    is_crater = False
+                    craters = [(-2, -2, 1.8), (3, 1, 1.4), (-1, 3, 1.9)]
+                    for cxr, cyr, crad in craters:
+                        if (dx - cxr)**2 + (dy - cyr)**2 <= crad**2:
+                            is_crater = True
+                            break
+                    if is_crater:
+                        col = (int(col[0] * 0.62), int(col[1] * 0.62), int(col[2] * 0.65))
+                else:
+                    glow = int(14 + (1.0 - z) * 14)
+                    col = (glow, glow + 4, glow + 14)
+                    
+                pixoo.draw_pixel((x, y), col)
+
+def draw_large_weather_icon(pixoo, condition, x_min=0, x_max=28, y_min=9, y_max=26):
+    SUN_WHITE, SUN_CORE, SUN_GLOW, SUN_RAY = (255, 255, 230), (255, 230, 0), (255, 120, 0), (230, 60, 0)
+    CLOUD_WHITE, CLOUD_BODY, CLOUD_SHADE = (255, 255, 255), (185, 195, 205), (105, 115, 125)
+    STORM_BODY, STORM_SHADE = (110, 115, 125), (65, 70, 80)
+    RAIN_DEEP, RAIN_LITE, SNOW_CRYST = (0, 95, 230), (75, 175, 255), (215, 240, 255)
     
     pixels = []
-    
     if condition == "rain":
-        # Multi-toned stormy gray base cloud layer
         for dx in range(2, 16):
             for dy in range(3, 9): pixels.append((dx, dy, STORM_BODY))
         for dx in range(5, 13):
             for dy in range(1, 3): pixels.append((dx, dy, STORM_BODY))
         for dx in range(2, 16): pixels.append((dx, 8, STORM_SHADE))
-        # Wind-swept directional light/dark rain matrix
         pixels.extend([
             (4, 10, RAIN_LITE), (3, 11, RAIN_DEEP), (2, 12, RAIN_DEEP),
             (8, 10, RAIN_LITE), (7, 11, RAIN_DEEP), (6, 12, RAIN_DEEP),
@@ -177,68 +230,53 @@ def draw_large_weather_icon(pixoo, condition, x_min=0, x_max=28, y_min=8, y_max=
             (15, 10, RAIN_LITE), (14, 11, RAIN_DEEP), (13, 12, RAIN_DEEP)
         ])
     elif condition == "snow":
-        # Soft cold winter white cloud base
         for dx in range(2, 16):
             for dy in range(3, 9): pixels.append((dx, dy, CLOUD_BODY))
         for dx in range(5, 13):
             for dy in range(1, 3): pixels.append((dx, dy, CLOUD_WHITE))
         for dx in range(2, 16): pixels.append((dx, 8, CLOUD_SHADE))
-        # Intricate multi-point structural snowflake pixels
         pixels.extend([
             (4, 10, CLOUD_WHITE), (3, 11, SNOW_CRYST), (5, 11, SNOW_CRYST), (4, 12, CLOUD_WHITE),
             (9, 11, CLOUD_WHITE), (8, 12, SNOW_CRYST), (10, 12, SNOW_CRYST), (9, 13, CLOUD_WHITE),
             (14, 10, CLOUD_WHITE), (13, 11, SNOW_CRYST), (15, 11, SNOW_CRYST), (14, 12, CLOUD_WHITE)
         ])
     elif condition == "cloudy":
-        # Highly dimensional shaded fluffy gray cumulus cloud
         for dx in range(1, 17):
             for dy in range(4, 11): pixels.append((dx, dy, CLOUD_BODY))
         for dx in range(4, 14):
             for dy in range(1, 4): pixels.append((dx, dy, CLOUD_BODY))
-        # Top-down ambient white highlight rings
         top_highlights = [(4,1), (5,1), (6,1), (7,1), (8,1), (9,1), (10,1), (11,1), (12,1), (13,1), (1,4), (2,4), (3,4), (14,4), (15,4), (16,4)]
         for dx, dy in top_highlights: pixels.append((dx, dy, CLOUD_WHITE))
-        # Ground-up core reflection lowlight edge arrays
         for dx in range(1, 17): pixels.append((dx, 10, CLOUD_SHADE))
     elif condition == "partly cloudy":
-        # Sun background vector mapping with concentric orange glow ring
         for dx in range(1, 10):
             for dy in range(1, 10): pixels.append((dx, dy, SUN_GLOW))
         for dx in range(2, 9):
             for dy in range(2, 9): pixels.append((dx, dy, SUN_CORE))
         for dx in range(4, 7):
             for dy in range(4, 7): pixels.append((dx, dy, SUN_WHITE))
-        # Foreground shifting body masking cloud elements overlapping sun base
         for dx in range(6, 19):
             for dy in range(6, 13): pixels.append((dx, dy, CLOUD_BODY))
         for dx in range(9, 16):
             for dy in range(4, 6): pixels.append((dx, dy, CLOUD_BODY))
-        # Highlight and shadow definition lines
         top_rim = [(9,3), (10,3), (11,3), (12,3), (13,3), (14,3), (15,3), (6,5), (7,5), (8,5), (16,5), (17,5), (18,5)]
         for dx, dy in top_rim: pixels.append((dx, dy, CLOUD_WHITE))
         for dx in range(6, 19): pixels.append((dx, 12, CLOUD_SHADE))
-    else:  # clear / sunny
-        # Highly saturated nested circular incandescent solar engine
+    else:
         for dx in range(3, 12):
             for dy in range(3, 12): pixels.append((dx, dy, SUN_GLOW))
         for dx in range(4, 11):
             for dy in range(4, 11): pixels.append((dx, dy, SUN_CORE))
         for dx in range(6, 9):
             for dy in range(6, 9): pixels.append((dx, dy, SUN_WHITE))
-        # Dual-tone directional starburst projection rays
         rays_glow = [(7,0), (7,14), (0,7), (14,7), (2,2), (12,2), (2,12), (12,12)]
         rays_fire = [(7,1), (7,13), (1,7), (13,7), (3,3), (11,3), (3,11), (11,11), (7,2), (7,12), (2,7), (12,7)]
         for dx, dy in rays_glow: pixels.append((dx, dy, SUN_GLOW))
         for dx, dy in rays_fire: pixels.append((dx, dy, SUN_RAY))
         
-    all_dx = [p[0] for p in pixels]
-    all_dy = [p[1] for p in pixels]
-    
-    icon_w = max(all_dx) - min(all_dx) + 1
-    icon_h = max(all_dy) - min(all_dy) + 1
-    box_w = x_max - x_min + 1
-    box_h = y_max - y_min + 1
-    
+    all_dx, all_dy = [p[0] for p in pixels], [p[1] for p in pixels]
+    icon_w, icon_h = max(all_dx) - min(all_dx) + 1, max(all_dy) - min(all_dy) + 1
+    box_w, box_h = x_max - x_min + 1, y_max - y_min + 1
     offset_x = x_min + (box_w - icon_w) // 2 - min(all_dx)
     offset_y = y_min + (box_h - icon_h) // 2 - min(all_dy)
     
@@ -256,14 +294,8 @@ def draw_mta_bullet(pixoo, letter, start_x, start_y, color):
     for dx, dy in let: pixoo.draw_pixel((start_x + dx, start_y + dy), WHITE)
 
 def draw_stationary_train_times(pixoo, times_list, y, color):
-    """Draws transit digits centered inside tracking cells right-aligned to column 61."""
-    slots = [
-        {"min_x": 29, "max_x": 37},
-        {"min_x": 41, "max_x": 49},
-        {"min_x": 53, "max_x": 61}
-    ]
+    slots = [{"min_x": 29, "max_x": 37}, {"min_x": 41, "max_x": 49}, {"min_x": 53, "max_x": 61}]
     slot_width = 9
-    
     pixoo.draw_pixel((39, y + 4), color)
     pixoo.draw_pixel((51, y + 4), color)
     
@@ -276,70 +308,120 @@ def draw_stationary_train_times(pixoo, times_list, y, color):
         if i < len(times_list):
             val_str = str(times_list[i])
             text_w = get_text_width(val_str)
-            
             start_x = slots[i]["min_x"] + (slot_width - text_w) // 2
             draw_text_custom(pixoo, val_str, start_x, y, color)
+
+def draw_mini_sunset(pixoo, x, y):
+    YELLOW, ORANGE, DEEP_BLUE = (255, 220, 0), (255, 90, 0), (0, 70, 190)
+    for dx, dy in [(2,1), (3,1), (4,1), (1,2), (2,2), (3,2), (4,2), (5,2)]:
+        if 0 <= x + dx < 64: pixoo.draw_pixel((x + dx, y + dy), YELLOW)
+    if 0 <= x + 3 < 64: pixoo.draw_pixel((x + 3, y), ORANGE)
+    for dx in range(0, 7):
+        if 0 <= x + dx < 64: pixoo.draw_pixel((x + dx, y + 3), DEEP_BLUE)
 
 def main():
     print(f"Syncing with Pixoo 64 at IP: {PIXOO_IP}...")
     try: pixoo = Pixoo(PIXOO_IP)
     except Exception as e: print(f"Init failed: {e}"); return
 
+    last_fetch_time = 0
+    weather, financials, subway = None, None, None
+    ticker_x = 64
+
     while True:
-        weather, stocks, subway = get_weather(), get_stocks(), get_subway_times(STATION_ID)
+        current_time = time.time()
+        if current_time - last_fetch_time >= REFRESH_INTERVAL or weather is None:
+            weather = get_weather()
+            financials = get_financials()
+            subway = get_subway_times(STATION_ID)
+            last_fetch_time = current_time
+
         pixoo.clear()
-        
-        WHITE, ORANGE, VIVID_BLUE, CYAN, GREEN, RED, GRAY = (255, 255, 255), (255, 110, 0), (0, 120, 255), (0, 255, 255), (0, 255, 0), (255, 0, 0), (100, 100, 100)
-        stock_color = GREEN if stocks['up'] else RED
+        WHITE, ORANGE, VIVID_BLUE, CYAN, GRAY = (255, 255, 255), (255, 110, 0), (0, 120, 255), (0, 255, 255), (80, 80, 80)
         
         # --- WEATHER CARD ---
         now_local = datetime.now()
         days_map = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
         date_str = f"{days_map[now_local.weekday()]} {now_local.month}/{now_local.day}"
-        draw_text_custom(pixoo, date_str, 2, 2, WHITE)
+        draw_text_custom(pixoo, date_str, 2, 3, WHITE)
         
-        draw_text_custom(pixoo, "HI", 42 - get_text_width("HI"), 8, ORANGE)
-        draw_text_custom(pixoo, "LO", 42 - get_text_width("LO"), 14, VIVID_BLUE)
+        draw_text_custom(pixoo, "HI", 42 - get_text_width("HI"), 9, ORANGE)
+        draw_text_custom(pixoo, "LO", 42 - get_text_width("LO"), 15, VIVID_BLUE)
         
-        # Dynamic contextual mini-graphic generation (White snowflake vs Cyan drop)
         if weather['cond'] == "snow":
             snowflake = [(0,0), (3,0), (1,1), (2,1), (0,2), (1,2), (2,2), (3,2), (1,3), (2,3), (0,4), (3,4)]
-            for dx, dy in snowflake: pixoo.draw_pixel((38 + dx, 20 + dy), WHITE)
+            for dx, dy in snowflake: pixoo.draw_pixel((38 + dx, 21 + dy), WHITE)
         else:
             raindrop = [(1,0), (1,1), (2,1), (0,2), (1,2), (2,2), (3,2), (0,3), (1,3), (2,3), (3,3), (1,4), (2,4)]
-            for dx, dy in raindrop: pixoo.draw_pixel((38 + dx, 20 + dy), CYAN)
+            for dx, dy in raindrop: pixoo.draw_pixel((38 + dx, 21 + dy), CYAN)
         
-        draw_text_custom(pixoo, f"{weather['curr']}F", 62 - get_text_width(f"{weather['curr']}F"), 2, WHITE)
-        draw_text_custom(pixoo, f"{weather['high']}F", 62 - get_text_width(f"{weather['high']}F"), 8, ORANGE)
-        draw_text_custom(pixoo, f"{weather['low']}F", 62 - get_text_width(f"{weather['low']}F"), 14, VIVID_BLUE)
-        draw_text_custom(pixoo, f"{weather['rain']}%", 61 - get_text_width(f"{weather['rain']}%"), 20, CYAN)
+        draw_text_custom(pixoo, f"{weather['curr']}F", 62 - get_text_width(f"{weather['curr']}F"), 3, WHITE)
+        draw_text_custom(pixoo, f"{weather['high']}F", 62 - get_text_width(f"{weather['high']}F"), 9, ORANGE)
+        draw_text_custom(pixoo, f"{weather['low']}F", 62 - get_text_width(f"{weather['low']}F"), 15, VIVID_BLUE)
+        draw_text_custom(pixoo, f"{weather['rain']}%", 61 - get_text_width(f"{weather['rain']}%"), 21, CYAN)
         
-        draw_large_weather_icon(pixoo, weather['cond'], x_min=0, x_max=28, y_min=8, y_max=25)
-        draw_dotted_line(pixoo, 26, GRAY)
+        if weather.get('is_night', False) and weather['cond'] not in ["rain", "snow"]:
+            current_phase_val = get_moon_phase_value()
+            draw_large_moon_phase(pixoo, current_phase_val, x_min=0, x_max=28, y_min=9, y_max=26)
+        else:
+            draw_large_weather_icon(pixoo, weather['cond'], x_min=0, x_max=28, y_min=9, y_max=26)
+            
+        draw_dotted_line(pixoo, 27, GRAY)
         
-        # --- STOCKS CARD ---
-        draw_text_custom(pixoo, "SP500", 2, 29, stock_color)
+        # --- DOUBLE-BUFFERED SEAMLESS TICKER ---
+        ticker_items = [
+            ('text', f"SPX {financials['spx']['arrow']}{financials['spx']['perf']}", financials['spx']['color']),
+            ('space', 14, None),
+            ('text', f"RUT {financials['rut']['arrow']}{financials['rut']['perf']}", financials['rut']['color']),
+            ('space', 14, None),
+            ('text', f"TNX {financials['tnx']['perf']}", financials['tnx']['color']),
+            ('space', 14, None),
+            ('icon', 'sunset', None),
+            ('space', 3, None),
+            ('text', weather['sunset'], ORANGE),
+            ('space', 14, None)  # Synchronized with standard 14px interval for seamless looping
+        ]
         
-        val_x = 61 - get_text_width(stocks['perf'])
-        draw_text_custom(pixoo, stocks['perf'], val_x, 29, stock_color)
-        draw_text_custom(pixoo, stocks['arrow'], val_x - 6, 29, stock_color)
-        
-        draw_dotted_line(pixoo, 36, GRAY)
+        total_ticker_width = 0
+        for itype, val, _ in ticker_items:
+            if itype == 'text': total_ticker_width += get_text_width(val)
+            elif itype == 'space': total_ticker_width += val
+            elif itype == 'icon': total_ticker_width += 7
+
+        for loop_offset in [0, total_ticker_width]:
+            cx = ticker_x + loop_offset
+            for itype, val, col in ticker_items:
+                if itype == 'text': item_w = get_text_width(val)
+                elif itype == 'space': item_w = val
+                elif itype == 'icon': item_w = 7
+                
+                if -item_w <= cx < 64:
+                    if itype == 'text':
+                        draw_text_custom(pixoo, val, cx, 30, col)
+                    elif itype == 'icon' and val == 'sunset':
+                        draw_mini_sunset(pixoo, cx, 31)
+                cx += item_w
+
+        ticker_x -= TICKER_STEP
+        if ticker_x <= -total_ticker_width:
+            ticker_x = 0
+
+        draw_dotted_line(pixoo, 37, GRAY)
         
         # --- MTA TRANSIT CARD ---
-        draw_mta_bullet(pixoo, 'A', 2, 38, VIVID_BLUE)
-        draw_mta_bullet(pixoo, 'C', 10, 38, VIVID_BLUE)
-        draw_mta_bullet(pixoo, 'E', 18, 38, VIVID_BLUE)
+        draw_mta_bullet(pixoo, 'A', 2, 39, VIVID_BLUE)
+        draw_mta_bullet(pixoo, 'C', 12, 39, VIVID_BLUE)
+        draw_mta_bullet(pixoo, 'E', 22, 39, VIVID_BLUE)
         
-        draw_text_custom(pixoo, "UP", 2, 47, VIVID_BLUE)
-        draw_stationary_train_times(pixoo, subway['uptown'], 47, WHITE)
+        draw_text_custom(pixoo, "UP", 2, 48, VIVID_BLUE)
+        draw_stationary_train_times(pixoo, subway['uptown'], 48, WHITE)
         
-        draw_text_custom(pixoo, "DOWN", 2, 55, VIVID_BLUE)
-        draw_stationary_train_times(pixoo, subway['downtown'], 55, WHITE)
+        draw_text_custom(pixoo, "DOWN", 2, 56, VIVID_BLUE)
+        draw_stationary_train_times(pixoo, subway['downtown'], 56, WHITE)
         
         try: pixoo.push()
         except Exception as e: print(f"Push failed: {e}")
-        time.sleep(REFRESH_INTERVAL)
+        time.sleep(TICKER_SPEED)
 
 if __name__ == "__main__":
     main()
