@@ -8,6 +8,7 @@ from pixoo import Pixoo
 # ==================== CONFIGURATION ====================
 PIXOO_IP = "192.168.1.153"  # Replace with your Pixoo 64's local IP address
 STATION_ID = "A28"          # "A28" is 34 St-Penn Station (A/C/E). Change to your target station ID.
+MIN_CATCHABLE_MIN = 6       # Ignore trains closer than this (walking time to station). Fallback shows soonest if empty.
 REFRESH_INTERVAL = 30       # Time in seconds between background data refreshes
 
 # --- TICKER SPEED CONTROLS (BLOOMBERG-STYLE) ---
@@ -161,8 +162,21 @@ def get_subway_times(stop_id_prefix):
                     arrival = update.arrival or update.departure
                     if arrival and arrival > now:
                         downtown_times.append(int((arrival - now).total_seconds() / 60))
-        uptown_times = sorted(list(set(uptown_times)))[:3]
-        downtown_times = sorted(list(set(downtown_times)))[:3]
+        uptown_times = sorted(list(set(uptown_times)))
+        downtown_times = sorted(list(set(downtown_times)))
+
+        catchable_uptown = [t for t in uptown_times if t >= MIN_CATCHABLE_MIN][:3]
+        catchable_downtown = [t for t in downtown_times if t >= MIN_CATCHABLE_MIN][:3]
+
+        # Fallback: if nothing is catchable, show soonest trains anyway so the row
+        # doesn't read as "no data" when trains are just too close to make.
+        if not catchable_uptown:
+            catchable_uptown = uptown_times[:3]
+        if not catchable_downtown:
+            catchable_downtown = downtown_times[:3]
+
+        uptown_times = catchable_uptown
+        downtown_times = catchable_downtown
     except Exception as e:
         print(f"MTA Subway Fetch Error: {e}")
     return {"uptown": uptown_times, "downtown": downtown_times}
