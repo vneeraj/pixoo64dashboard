@@ -91,7 +91,8 @@ def get_weather():
         low = str(int(round(data['daily']['temperature_2m_min'][0])))
         
         current_hour = datetime.now().hour
-        rain = str(data['hourly']['precipitation_probability'][current_hour])
+        remaining_probs = data['hourly']['precipitation_probability'][current_hour:]
+        rain = str(max(remaining_probs)) if remaining_probs else "0"
         wmo_code = data['current']['weather_code']
         
         if wmo_code in [0]: cond = "clear"
